@@ -103,6 +103,7 @@ for(i in HMM_results){
                                          angle = 0), alpha = 0.1, fill = 'grey', 
                           colour = 'grey')+
     geom_point(data = df, aes(x = lon, y = lat, color = date))+theme_bw()
+  #Saving resulting plot
   if(grepl("157566", i) | grepl("178974", i)){
     ggsave(paste0("../Outputs/BehaviourCalcs/", TagResults$name[2], ".tiff"), m1, "tiff", 
          dpi = 400)
