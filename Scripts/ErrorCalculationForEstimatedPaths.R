@@ -26,11 +26,15 @@ HMM_results <- list.files(pattern = "HMMoce_results.csv", recursive = T)
 #Create a loop using list of directories to save best results as identified by the model
 for(i in HMM_results){
   #Load HMMoce result for each tag
-  TagResults <- read.csv(HMM_results[i]) %>% arrange(nll)
+  TagResults <- read.csv(i) %>% arrange(nll)
   #Identify best model (first row as dataset has been arranged by nll) and load results
   #into environment
-  load(list.files(pattern = glob2rx(paste0(TagResults$name[1], "*.rda$")), 
+  #Manually identifying the second best nll as the best track for two tags in particular
+  if(grepl("157566", i) | grepl("178974", i)){
+    load(list.files(pattern = glob2rx(paste0(TagResults$name[2], "-HMMoce.rda$")), 
                   recursive = T))
+  }else{load(list.files(pattern = glob2rx(paste0(TagResults$name[1], "-HMMoce.rda$")), 
+                        recursive = T))}
   
   # Plotting errors for calculated paths
   ## for a 90% confidence interval use threshold = 10
@@ -48,40 +52,57 @@ for(i in HMM_results){
                              TRUE ~ xdist),
            ydist = case_when(is.na(ydist) ~ mean(ydist, na.rm = T), 
                              TRUE ~ ydist))
-  #Saving data as csv file
-  write.csv(df, paste0(OutFolder, "csvFiles/", TagResults$name[1], ".csv"), row.names = F)
   
-  ### Creating and exporting shapefile
-  #Creating shapefile with CRS: WGS84
-  coordinates(df) = ~lon+lat
-  proj4string(df) = CRS("++proj=longlat +datum=WGS84")
-  shapefile(df, paste0(OutFolder, TagResults$name[1], ".shp"), overwrite = T)
+  #Saving data as csv file - Names depend on best estimated track for the tag
+  if(grepl("157566", i) | grepl("178974", i)){
+    write.csv(df, paste0(OutFolder, "csvFiles/", TagResults$name[2], ".csv"), 
+              row.names = F)
+  }else{write.csv(df, paste0(OutFolder, "csvFiles/", TagResults$name[1], ".csv"), 
+                    row.names = F)}
+  
+  ### Creating and exporting shapefile with CRS: WGS84
+  shp <- df
+  coordinates(shp) = ~lon+lat
+  proj4string(shp) = CRS("++proj=longlat +datum=WGS84")
+  #Saving shapefile with name of best estimated track for the tag
+  if(grepl("157566", i) | grepl("178974", i)){
+    shapefile(shp, paste0(OutFolder, TagResults$name[2], ".shp"), overwrite = T)
+  }else{shapefile(shp, paste0(OutFolder, TagResults$name[1], ".shp"), overwrite = T)}
   
   ### Calculating distance between points in km
   #Creating dataset which includes dates, coordinates and distances for each estimated
   #location for that tag 
-  #distHaversine() provides distance in m, but they are divided by 1000 to present 
-  #distance in Km
-  distPts <- tibble(date = df@data$date, lon = df@coords[,"lon"], lat = df@coords[,"lat"],
-                   dist_km =  c(NA, round(distHaversine(df)/1000, 3)),
-                   vel_ms = dist_km*1000/86400)
-}
-
-
-
-###Plotting directly in R
-## make a plot
-world <- map_data('world')
-xl <- c(min(df$lon) - 2, max(df$lon) + 2)
-yl <- c(min(df$lat) - 2, max(df$lat) + 2)
-
-## simple map of move data
-m1 <- ggplot() + geom_polygon(data = world, aes(x = long, y = lat, group = group)) + 
-  coord_fixed(xlim = xl, ylim = yl, ratio = 1.3) + xlab('') + ylab('')
-
-## add confidence intervals (use geom_ellipse from ggforce package)
-m1 <- m1 + geom_ellipse(data = df, aes(x0 = lon, y0 = lat, a = xdist, b = ydist, 
-                                       angle = 0), alpha = 0.1, fill = 'grey', 
-                        colour = 'grey')+
-  geom_point(data = df, aes(x = lon, y = lat))
+  distPts <- tibble(date = shp@data$date, 
+                    lon = shp@coords[,"lon"], 
+                    lat = shp@coords[,"lat"],
+                    #distHaversine() provides distance in m, but it is divided by 1000 to 
+                    #present distance in Km
+                    dist_km =  c(NA, round(distHaversine(shp)/1000, 3)),
+                    #Calculating speed as m per second
+                    vel_ms = dist_km*1000/86400)
+  
+  #Saving distance and speed calculations with the name of best estimated track for the tag
+  if(grepl("157566", i) | grepl("178974", i)){
+    write.csv(distPts, paste0("../Outputs/BehaviourCalcs/", TagResults$name[2], ".csv"), 
+              row.names = F)
+  }else{write.csv(distPts, paste0( "../Outputs/BehaviourCalcs/", TagResults$name[1], 
+                                   ".csv"), row.names = F)}
+ 
+  ###Plotting directly in R
+  ## make a plot
+  world <- map_data('world')
+  xl <- c(min(df$lon) - 2, max(df$lon) + 2)
+  yl <- c(min(df$lat) - 2, max(df$lat) + 2)
+  
+  ## simple map of move data
+  m1 <- ggplot() + geom_polygon(data = world, aes(x = long, y = lat, group = group)) + 
+    coord_fixed(xlim = xl, ylim = yl, ratio = 1.3) + xlab('') + ylab('')
+  
+  ## add confidence intervals (use geom_ellipse from ggforce package)
+  m1 <- m1 + geom_ellipse(data = df, aes(x0 = lon, y0 = lat, a = xdist, b = ydist, 
+                                         angle = 0), alpha = 0.1, fill = 'grey', 
+                          colour = 'grey')+
+    geom_point(data = df, aes(x = lon, y = lat, color = date))+theme_bw()
+  m1
+  }
 
