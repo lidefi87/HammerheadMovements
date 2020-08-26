@@ -30,7 +30,7 @@ TagNumb <- dir(path = "Data/SPOT_Tags/", pattern = "[0-9]{6}$", full.names = T)
 TagData <- dir(path = "Data/SPOT_Tags/", pattern = "-RawArgos.csv$", full.names = T, 
                recursive = T)
 
-#Variable containing location classes related to data quality (Classes: G > 3 > 2 > 1 > 0 > A > B > Z)
+{#Variable containing location classes related to data quality (Classes: G > 3 > 2 > 1 > 0 > A > B > Z)
 #Change this variable if you want to include more or less location classes
 classInt = c(0:3)
 
@@ -81,7 +81,8 @@ for(i in seq_along(TagData)){
         ind <- append(ind, j)
       }}}
   #Remove vectors identified above
-  tagData <- tagData[-ind,]
+  if(length(ind) != 0){
+    tagData <- tagData[-ind,]}
   #Recalculate velocity and longitude differences
   tagData <- tagData %>% mutate(dist_km =  head(c(NA, round(geosphere::distGeo(.[c("Longitude", "Latitude")])/1000, 
                                      3)), -1),
@@ -99,7 +100,7 @@ for(i in seq_along(TagData)){
   rm(tagData, rawData)}
   
 #Remove variables no longer in use
-rm(classInt, i, TagData, TagNumb, SuppInfo, ind, j)
+rm(i, ind, j)
 
 #Add a column with lunar phases to the combined dataset with all SPOT information
 combinedData <- combinedData %>% mutate(moonPhase = lunar::lunar.phase(Date, name = 8),
@@ -130,6 +131,10 @@ Dailyshp <- DailySum %>%
   #Assigning WGS84 coordinate reference system
   st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326) 
 
+#Draw map
+ggplot()+geom_sf(data = GMRWGS84)+
+  geom_sf(data = Dailyshp, aes(colour = PTT))
+
 #Creating a new column GMR which will indicate whether each observation is inside or
 #outside the GMR
 InOut <- Dailyshp %>% 
@@ -143,6 +148,96 @@ InOut <- Dailyshp %>%
   drop_na(DifLon)
 
 write_csv(InOut, "../Outputs/SPOTs_MeanDistLon.csv")
+}
+
+
+
+
+
+# Applying time SSM to SPOT data with foieGras package --------------------
+library(foieGras)
+
+#Create empty dataset to store data for all tags
+combinedFG <- data.frame()
+
+#Compiling all raw data for all tags
+for(i in seq_along(TagData)){
+  #Upload file containing raw Argos data
+  rawData <- read.csv(TagData[i], stringsAsFactors = F)
+  #Extract data needed for analysis
+  tagData <- rawData %>% as_tibble() %>% 
+    #Remove NA values
+    drop_na(Longitude, Latitude) %>% 
+    #Keep only variables of interest: Tag ID, date, ARGOS location class (lc), 
+    #longitude, latitude
+    select(id = PTT,  lc = Class, PassDate, PassTime, lon = Longitude, 
+           lat = Latitude) %>% 
+    #Change variable type of date column to date
+    mutate(PassDate = lubridate::parse_date_time(PassDate, orders = "dmy"),
+           id = factor(id)) %>% 
+    #Filter out detections after the release date specified in the SuppInfo dataset
+    filter(PassDate <= SuppInfo$ReleaseDate[i]) %>% 
+    #Unite date and time columns and convert them to date format
+    unite(date, PassDate, PassTime, sep = " ", remove = F) %>% 
+    mutate(date = as.POSIXct(date)) %>% 
+    arrange(date) 
+  #Adding tag data to combined dataframe
+  combinedFG <- rbind(combinedFG, tagData)
+  #Delete variables that are no longer needed
+  rm(tagData, rawData)}
+
+#Divide tracks into smaller sections if there are gaps longer than 7 days
+combinedFG <- combinedFG %>% group_by(id) %>% 
+  mutate(TimeDiff = as.numeric(date-lag(date), units = "days"),
+         id = as.character(id)) 
+which(combinedFG$TimeDiff > 7)
+which(is.na(combinedFG$TimeDiff))
+
+#Manually changing the name of id to divide track into smaller sections
+combinedFG$id[145:196] = paste(combinedFG$id[145], 2, sep = "_")
+combinedFG$id[708:1136] = paste(combinedFG$id[708], 2, sep = "_")
+combinedFG$id[1137:1171] = paste(combinedFG$id[1137], 3, sep = "_")
+combinedFG$id[1172:1226] = paste(combinedFG$id[1172], 4, sep = "_")
+
+#Fitting a continuous-time SSM to filter Argos satellite geolocation data
+#Maximum travel rate set at 7 m/s
+#Correlated random walk model used
+#Predictions to be calculated every 12 hours
+fit <- combinedFG %>% ungroup() %>% 
+  select(id, date, lc, lon, lat) %>%
+  fit_ssm(., vmax = 7, model = "crw", time.step = 24)
+#Plotting all predictions (lat and lon to appear in the same graph per tag)
+plot(fit, what = "predicted", type = 2)
+
+#Get shapefile containing predicted points for all tags
+shp <- grab(fit, "predicted") %>% 
+  st_transform(crs(GMRWGS84))
+
+#Plotting map
+ggplot()+geom_sf(data = GMRWGS84)+
+  geom_sf(data = shp, aes(colour = id))
+
+#Classify data points relative to its position to the GMR
+PredPts <- shp %>% 
+  mutate(GMR = case_when(st_intersects(., GMRWGS84, sparse = F) == T ~ "In",
+                         st_intersects(., GMRWGS84, sparse = F) == F ~ "Out")) %>% 
+  #Extracting coordinates from geometry to include them dataset
+  mutate(lon = st_coordinates(.)[,1], lat = st_coordinates(.)[,2]) %>% 
+  #Change shapefile into data frame
+  st_drop_geometry() %>% 
+  select(id, date, GMR, lon, lat) %>% 
+  group_by(id) %>% 
+  #Calculating differences in longitude between points
+  mutate(DifLon = c(NA, abs(diff(lon)))) %>% 
+  #Including final point for 198362 - model did not converge
+  bind_rows(combinedFG %>% filter(id == "198362_2") %>% 
+              filter(date == max(date)) %>%
+              distinct(lc, date, .keep_all = T) %>% 
+              select(-c("lc", "PassDate", "PassTime", "TimeDiff")) %>% 
+              #Removing the track section from the ID
+              mutate(GMR = "Out", id = str_extract(id, "[0-9]{6}"))) %>% 
+  #Removing the track section from the ID
+  mutate(id = str_extract(id, "[0-9]{6}"))
 
 
 # Testing for differences in means using Analysis of Variance -------------
@@ -151,37 +246,35 @@ library(rstatix)
 
 #Getting summary statistics only for groups that have observations inside and outside
 #the GMR
-InOut %>% 
+PredPts %>% 
   #Grouping by location and tag
-  group_by(GMR, PTT) %>% 
-  #Calculating summary stats (mean and SD)
-  get_summary_stats(DifLon, type = "mean_sd") %>% 
+  group_by(GMR, id) %>% 
+  summarise(N = n()) %>% 
   #Keep tags with 3 or more observations
-  filter(n >= 3) %>% 
+  filter(N >= 3) %>% 
   print() %>% 
   #Keeping only tags that appear in and out of the GMR for comparison
-  group_by(PTT) %>%
+  group_by(id) %>%
   filter(n() >1) %>%
   #Save the tag numbers to filter dataset
-  distinct(PTT) -> Tags
+  distinct(id) -> Tags
 
-#Keep tags previously identified
-CompTags <- InOut %>% 
-  #Kepp only tags previously identified as suitable for comparison
-  filter(PTT %in% Tags$PTT)
-  
+#Keeping only tags with locations inside and outside the GMR
+CompTags <- PredPts %>% 
+  filter(id %in% Tags$id)
+
 #Visualise distribution of data points inside tags being compared
 CompTags %>%
-  ggboxplot(x = "GMR", y = "DifLon", color = "PTT", add = "point")
+  ggboxplot(x = "GMR", y = "DifLon", color = "id", add = "point")
 CompTags %>%
   ggboxplot(x = "GMR", y = "DifLon", add = "point")
 
 #Identifying outliers
 ExtOutliers <- CompTags %>% 
   #Selecting relevant columns
-  select(PTT, DifLon, GMR) %>% 
+  select(id, DifLon, GMR) %>% 
   #Grouping by location and tag
-  group_by(GMR) %>% 
+  group_by(GMR, id) %>% 
   #Identifying outliers per location and tag
   identify_outliers(., DifLon) %>% 
   #Only keeping extreme outliers
@@ -199,7 +292,7 @@ CompTags %>%
 #Removing extreme outliers
 NoOut <- CompTags %>% 
   anti_join(ExtOutliers, by = c("DifLon", "GMR")) %>% 
-  mutate(PTT = factor(PTT),
+  mutate(id = factor(id),
          GMR = factor(GMR))
 NoOut %>% 
   group_by(GMR) %>% 
@@ -212,190 +305,94 @@ NoOut %>%
 #PERMANOVA
 library(vegan)
 #Using data where a tag has at least three observations
-InOut %>% 
+NoOut %>% 
   #Grouping by location and tag
-  group_by(GMR, PTT) %>% 
-  #Keep tags with 3 or more observations
-  filter(n() >= 3) %>%
+  group_by(GMR, id) %>% 
+  drop_na() %>% 
   #Testing for differences in location, while controlling for tag (PTT)
-  adonis(DifLon ~ GMR, ., permutations = 9999, strata = .$PTT)
+  adonis(DifLon ~ GMR, ., permutations = 9999, strata = .$id)
 
+NoOut %>% group_by(GMR) %>% 
+  summarise(MeanLonDif = mean(DifLon, na.rm = T))
 
+NoOut %>% distinct(id)
 
-
-
-#All locations are in water - Section commented out
-######################## CREATING POINT SHAPEFILE WITH CLEAN DATA FOR SSM ##############################
-#Creating shapefile that only includes water points using the Galapagos layer
-#Create a vector of unique datapoints with CRS: WGS84
-# combinedDataLyr <-  combinedData
-# coordinates(combinedDataLyr) <-  ~Longitude+Latitude
-# proj4string(combinedDataLyr) <-  CRS("++proj=longlat +datum=WGS84")
-# crs(combinedDataLyr) <-  crs(GalIslWGS84)
-#
-# #Find points that fall on land using the island layer and delete them from the main database
-# x = over(combinedDataLyr, GalIslWGS84)
-# #Use previous data frame to find water only points (i.e., rows with NA values) in combined dataframe
-# combinedData = combinedData[which(is.na(x$id)),]
-# #Remove variables no longer needed
-# rm(x)
-# #Update point shapefile
-# combinedDataLyr = combinedData
-# coordinates(combinedDataLyr) = ~Longitude+Latitude
-# proj4string(combinedDataLyr) = CRS("++proj=longlat +datum=WGS84")
-# crs(combinedDataLyr) = crs(GalIslWGS84)
-# 
-# #Find points that fall within GMR borders and create a data frame
-# filteredPts = combinedDataLyr[GMRWGS84,]
-# rm(combinedDataLyr)
-# 
-# #Plotting maps to check if any points are located on land
-# plot(filteredPts)
-# plot(GalIslWGS84, add = T)
-# plot(GMRWGS84, add = T)
-#Zoom option can also be used as follows:
-# zoom(GalIslWGS84, ext = extent(combinedData))
-# plot(combinedData, add = T)
-
-# #Saving final output as shapefile
-# writeOGR(filteredPts, dsn = "C:/Users/Denisse/Documents/TigerSharksSatelliteDataKernels/Layers",
-#          layer = "cleanCombinedData", driver="ESRI Shapefile", overwrite_layer = T)
-#
-#
-################################# BAYESIAN STATE-SPACE MODEL (SSM) #####################################
-#Section not applicable - commented out
-# #Extracting filtered points to dataframe
-# combinedData = cbind(filteredPts@data, filteredPts@coords)
-
-#Rename dataset columns as needed for SSM application
-colnames(combinedData) <- c("id", "lc", "date", "lon", "lat")
-# rm(filteredPts)
-
-#Plot tracks with coordinates and varying colour based on date
-combinedData %>% ggplot(aes(lat, lon, col = date))+geom_path()+geom_point()+facet_wrap(~id)
-
-#Calculate number of days between observations initiating from the same tag
-combinedData <- combinedData %>% group_by(id) %>% mutate(days = (date-lag(date))/86400) %>% 
-  #Find gaps in observations of seven days or longer
-  mutate(split = case_when(days >=7, ~ "split"))
-
-#Find gaps in observations of seven days or longer
-which(combinedData$days >= 7)
-
-#Keep tags with over 60 observations
-#Get number of observations per tag number
-combinedData60 <- combinedData %>% right_join(combinedData %>% group_by(id) %>% 
-                                              summarise(Obs = n()) %>% filter(Obs > 60) %>% 
-                                              select(id), by = "id")
-
-#Fit state-space model
-fit <- fit_ssm(combinedData, model = "hDCRWS", tstep = 0.5, adapt = 10000)
-
-#Checking fit of model
-diag_ssm(fit)
-map_ssm(fit)
-plot_fit(fit)
-dev.off()
-
-#Extracting modelled values and creating a point shapefile
-result = get_summary(fit)
-coordinates(result) = ~lon+lat
-proj4string(result) = CRS("++proj=longlat +datum=WGS84")
-crs(result) = crs(GalIslWGS84)
-rm(combinedData)
-#Find points that fall on land using the island layer and delete them from the main database
-x = over(result, GalIslWGS84)
-#Use previous data frame to find water only points (i.e., rows with NA values) in combined dataframe
-cleanData = fit$summary[which(is.na(x$id)),]
-#Remove variables no longer needed
+#Save shapefiles individually
+for(i in seq_along(unique(PredPts$id))){
+  x <- PredPts %>% 
+    mutate(moonPhase = lunar::lunar.phase(date, name = 8)) %>% 
+    st_as_sf(coords = c("lon", "lat"), crs = 4326) 
+  x %>% filter(id == unique(x$id)[i]) %>% 
+    st_write(paste0("../Spatial/SPOT_Tags/SSM/T", unique(x$id)[i], ".shp"), 
+             delete_layer = T)
+}
 rm(x)
-#Update point shapefile
-coordinates(cleanData) = ~lon+lat
-proj4string(cleanData) = CRS("++proj=longlat +datum=WGS84")
-crs(cleanData) = crs(GalIslWGS84)
-rm(result)
-# #Save result as a shapefile
-# shapefile(cleanData, "C:/Users/Denisse/Documents/TigerSharksSatelliteDataKernels/Layers/SSMresults.shp",
-#           overwrite = T)
+
+#Calculating speed for tag 198368
+Speed198368 <- PredPts %>% filter(id == 198368) %>% 
+  mutate(dist_km =  head(c(NA, round(geosphere::distGeo(.[c("lon", "lat")])/1000, 
+                                     3)), -1),
+         #Calculating time difference between rows in seconds
+         TimeDiff = as.numeric(date-lag(date), units = "secs"),
+         #Calculating speed as m per second
+         vel_ms = round((dist_km*1000)/TimeDiff, 3))
+Speed198368 %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) %>% 
+  st_write("../Spatial/SPOT_Tags/SSM/T198368_Speed.shp", delete_layer = T)
+
+# AMT movement analysis ---------------------------------------------------
+{#First we duplicate the GMR layer
+GMR <- GMRWGS84
+
+#We then create a variable with the new bounding box values
+new_bb <-  c(-100, -6, -76, 14)
+names(new_bb) <- c("xmin", "ymin", "xmax", "ymax")
+#Assign this variable as a bounding box attribute
+attr(new_bb, "class") = "bbox"
+
+#We assign the newly created bounding box to the GMR layer
+attr(st_geometry(GMR), "bbox") = new_bb
+#Checking bounding box has been correctly assigned
+st_bbox(GMR)
+
+#Create a raster using the GMR layer with the new boundaries
+rGMR <- raster(GMR, res = 0.1)
+rGMR <- fasterize::fasterize(GMR, rGMR)
+#Check the raster
+plot(rGMR)
+rm(GMR)
+
+#Reclassifying into 1 representing the GMR and 0 representing outside areas
+#First create reclassification matrix
+rclmat <- matrix(c(0.9, 1, 1, NA, NA, 0), ncol = 3, byrow = T)
+rcGMR <- reclassify(rGMR, rclmat)
+#Check resulting raster
+plot(rcGMR)
+#Changing name of variable inside the raster to GMR
+names(rcGMR) <- "GMR"
+rm(rGMR)
+
+#Prepare location data
+combSPOT <- CompPts %>% 
+  select(x = lon, y = lat, t = date, id = id) %>% 
+  nest(-id) %>% mutate(trk = map(data, function(d) {
+    amt::make_track(d, x, y, t, crs = sp::CRS("+init=epsg:4326"))
+  }))
+
+#Obtaining a summarise of the time distribution intervals between successive locations 
+combSPOT %>% mutate(sr = lapply(trk, summarize_sampling_rate)) %>%
+  select(id, sr) %>% unnest
 
 
-############################# KERNEL DENSITY ESTIMATION USING SSM DATA #################################
-library(aspace)
-library(spatialEco)
+m1 <- combSPOT %>%
+  mutate(ssf = lapply(trk, function(x) {
+    #We have chosen to resample once per day
+    x %>% track_resample(rate = hours(24)) %>% 
+      filter_min_n_burst(min_n = 3) %>%
+      steps_by_burst() %>% 
+      random_steps() %>% 
+      extract_covariates(rcGMR, where = "start")
+    }))
 
-#Calculate standard distance (SDD) to estimate bandwidth (h)
-coords = data.frame(lat = cleanData$lat, lon = cleanData$lon)
-calc_sdd(points = coords) #Calculate SDD using coordinates
-#Plot SDD with Galapagos map as background to visually check results
-plot_sdd(plotnew = T)
-plot(GalIslWGS84, add = T)
-#Save SDD calculation as variable to be used in bandwidth estimation
-SDDpts = r.SDD$SDD
-#Using Silverman rule of thumb: h = 1.06*SD*n^-0.2 to calculate bandwith
-h = 1.06*SDDpts*(nrow(coords)^(-0.2))
-#Remove variables no longer in use
-rm(coords, r.SDD, SDDpts, sddatt, sddloc)
+}
 
-#Unweighted KDE calculation
-kde = sp.kde(x = cleanData, bw = h, n = 10000)
-#Remove any land areas from KDE raster
-kdeClip = raster::mask(kde, GalIslWGS84, inverse = T)
-rm(kde)
-
-############################ CALCULATING PERCENTAGE VOLUME CONTOURS ###################################
-#Create percentage volume contours (50%, 75%, 95%)
-p95 = raster.vol(kdeClip, p = 0.95)
-p75 = raster.vol(kdeClip, p = 0.75)
-p50 = raster.vol(kdeClip, p = 0.50)
-#Merge all contours together in one raster
-PVC = p95+p75+p50
-rm(p95, p75, p50)
-#Change zero values into NA - Reclassify all other values
-PVC[PVC == 0] = NA
-PVC[PVC == 3] = 0.5
-PVC[PVC == 2] = 0.75
-PVC[PVC == 1] = 0.95
-#Plot final raster with heat colour ramp
-plot(PVC, col = heat.colors(3))
-plot(GalIslWGS84, add = T)
-
-#Calculate area in km^2 covered by each contour
-tapply(area(PVC), PVC[], sum)
-
-# #Save final raster as a TIF file
-# writeRaster(PVC, filename = "C:/Users/Denisse/Documents/TigerSharksSatelliteDataKernels/Layers/KDEresult.tif",
-#             format = "GTiff", overwrite = T)
-
-#######################################################################################################
-
-#Calculate proportion of SSM locations within 5 and 10 km from turtle nesting beaches
-#Import locations of turtle nesting beaches
-Tort = shapefile("C:/Users/Denisse/Documents/TigerSharksSatelliteDataKernels/Layers/PlayasTortugas.shp")
-#Create buffers (5 and 10 km) using turtle nesting beaches (unit is in meters)
-x = buffer(Tort, width = 5000)
-y = buffer(Tort, width = 10000)
-#Clip out land areas using Galapagos layer
-Tort_5km = erase(x, GalIslWGS84)
-Tort_10km = erase(y, GalIslWGS84)
-#Remove unused variables
-rm(Tort, x, y)
-
-#Extract points within buffers
-Pts_5km = intersect(cleanData, Tort_5km)
-Pts_10km = intersect(cleanData, Tort_10km)
-
-#Calculate proportion of points within each buffer area
-prop5km = nrow(Pts_5km)/nrow(cleanData)
-prop10km = nrow(Pts_10km)/nrow(cleanData)
-
-# #Save all shapefiles created
-# shapefile(Pts_5km, filename = "C:/Users/Denisse/Documents/TigerSharksSatelliteDataKernels/Layers/5kmPts.shp",
-#           overwrite = T)
-# shapefile(Pts_10km, filename = "C:/Users/Denisse/Documents/TigerSharksSatelliteDataKernels/Layers/10kmPts.shp",
-#           overwrite = T)
-# shapefile(Tort_5km, filename = "C:/Users/Denisse/Documents/TigerSharksSatelliteDataKernels/Layers/5kmBuff.shp",
-#           overwrite = T)
-# shapefile(Tort_10km, filename = "C:/Users/Denisse/Documents/TigerSharksSatelliteDataKernels/Layers/10kmBuff.shp",
-#           overwrite = T)
-# shapefile(result, filename = "C:/Users/Denisse/Documents/TigerSharksSatelliteDataKernels/Layers/SSMresults.shp", 
-          # overwrite = T)

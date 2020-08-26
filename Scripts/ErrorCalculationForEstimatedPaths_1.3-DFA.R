@@ -84,7 +84,7 @@ for(i in HMM_results){
     #Creating new column for months and ordering it based on month name - DFA
     mutate(month = factor(months(date), levels = month.name, ordered = T),
            #Second column containing the lunar phase for location estimation date - DFA
-           moonPhase = lunar::lunar.phase(date, name = 4)) %>% 
+           moonPhase = lunar::lunar.phase(date, name = 8)) %>% 
     #Reordering months based on the year of tracking - DFA
     mutate(month = forcats::fct_reorder(month, lubridate::year(date))) %>% 
     #Calculate absolute change in longitude between points - DFA
@@ -226,11 +226,11 @@ TagsInt %>%
   #Keeping only tags that appear in and out of the GMR for comparison
   group_by(ptt) %>%
   #Save the tag numbers to filter dataset
-  filter(n() <= 1) %>% 
+  filter(n() > 1) %>% 
   distinct(ptt) -> Tags
 
-#Remove tag with not enough points for comparison
-TagsComp <- TagsInt %>% filter(!ptt %in% Tags$ptt)
+#Keeping tags with enough points for comparison
+TagsComp <- TagsInt %>% filter(ptt %in% Tags$ptt)
 
 #Visualising results
 TagsComp %>% 
@@ -266,3 +266,6 @@ TagsComp %>%
   group_by(GMR, ptt) %>% 
   #Testing for differences in location, while controlling for tag (PTT)
   adonis(DifLong ~ GMR, ., permutations = 9999, strata = .$ptt)
+
+TagsComp %>% group_by(GMR) %>% 
+  summarise(MeanLonDif = mean(DifLong, na.rm = T))
