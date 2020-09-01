@@ -117,14 +117,14 @@ P5 <- plotGraph2(PAT11)+
   theme(axis.title.y = element_blank())
 
 #To save individual plots use the line below. Change plot name accordingly
-# ggsave("../../Outputs/Reports/PlotsHorMovs/SPOT1.tiff", P1, "tiff", dpi = 400, 
+# ggsave("../Outputs/Reports/PlotsHorMovs/SPOT1.tiff", P1, "tiff", dpi = 400, 
 #        height = 16, width = 22, units = "cm")
 
 
 #Creating mosaic - with graphs stacked on top of one another
 Pall <- P1/P2/P3/P4/P5
 #Saving mosaic
-ggsave("../../Outputs/Reports/PlotsHorMovs/AllTags.tiff", Pall, "tiff", dpi = 400, 
+ggsave("../Outputs/Reports/PlotsHorMovs/AllTags.tiff", Pall, "tiff", dpi = 400, 
        height = 50, width = 25, units = "cm")
 
 
