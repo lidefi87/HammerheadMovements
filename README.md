@@ -1,2 +1,3 @@
-# HammerheadMovements
-Analysing hammerhead movements using satellite tags
+# Scalloped Hammerhead Shark (*Sphyrna lewini*) Movements  
+We used miniPAT and SPOT6 satellite tags to understand vertical and horizontal movements of potentially pregnant female scalloped hammerhead sharks (*Sphyrna lewini*) in the Galapagos Marine Reserve (GMR) and the wider Tropical Eastern Pacific (TEP) region.  
+This is a study by the Sharks Ecology Project of the Charles Darwin Foundation for the Galapagos Islands.
