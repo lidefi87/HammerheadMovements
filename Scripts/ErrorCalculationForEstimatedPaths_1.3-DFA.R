@@ -275,3 +275,5 @@ TagsComp %>%
 
 TagsComp %>% group_by(GMR) %>% 
   summarise(MeanLonDif = mean(DifLong, na.rm = T))
+
+#End
