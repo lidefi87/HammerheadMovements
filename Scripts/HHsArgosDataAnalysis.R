@@ -219,10 +219,13 @@ ggplot()+geom_sf(data = GMRWGS84)+
 
 #Classify data points relative to its position to the GMR
 PredPts <- shp %>% 
-  mutate(GMR = case_when(st_intersects(., GMRWGS84, sparse = F) == T ~ "In",
-                         st_intersects(., GMRWGS84, sparse = F) == F ~ "Out")) %>% 
+  # mutate(GMR = case_when(st_intersects(., GMRWGS84, sparse = F) == T ~ "In",
+  #                        st_intersects(., GMRWGS84, sparse = F) == F ~ "Out")) %>% 
   #Extracting coordinates from geometry to include them dataset
   mutate(lon = st_coordinates(.)[,1], lat = st_coordinates(.)[,2]) %>% 
+  #Classifying points based on their location relative to W91.75
+  mutate(GMR = case_when(lon <= -91.75 ~ "In",
+                         lon > -91.75 ~ "Out")) %>% 
   #Change shapefile into data frame
   st_drop_geometry() %>% 
   select(id, date, GMR, lon, lat) %>% 

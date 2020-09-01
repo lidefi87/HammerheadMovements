@@ -129,10 +129,16 @@ for(i in HMM_results){
   
   #Creating new GMR column which specifies if estimate was in or out of the GMR to 
   #calculate mean values of change - DFA
-  xx <- shp %>% mutate(GMR = case_when(st_intersects(shp, Gal, sparse = F) == T ~ "In", 
-                                 st_intersects(shp, Gal, sparse = F) == F ~ "Out")) %>% 
+  xx <- shp %>% 
+    # mutate(GMR = case_when(st_intersects(shp, Gal, sparse = F) == T ~ "In", 
+    #                              st_intersects(shp, Gal, sparse = F) == F ~ "Out")) %>% 
+    #Extracting coordinates from geometry to include them dataset
+    mutate(lon = st_coordinates(.)[,1], lat = st_coordinates(.)[,2]) %>% 
+    #Classifying points based on their location relative to W91.75
+    mutate(GMR = case_when(lon <= -91.75 ~ "In",
+                           lon > -91.75 ~ "Out")) %>% 
     #Essentially turning shapefile into data frame
-    st_drop_geometry()  %>% 
+    st_drop_geometry() %>% 
     #Add an extra column with infromation about the ptt (tag)
     mutate(ptt = str_extract(i, "[0-9]{6}"))
   DiffLongAll <- rbind(DiffLongAll, xx)
