@@ -1,11 +1,11 @@
 # Analysis of Hammerhead sharks (Sphyrna lewini) vertical movements -------
-# Date of latest update: 2020-06-30
+# Date of latest update: 2021-01-04
 # Version: 1
 # Prepared for the Sharks Ecology Project of the Charles Darwin Foundation (CDF)
 # Script related to publication entitled "xxxx" in xxxx magazine.
 
 
-# Libraries ---------------------------------------------------------------
+# Uploading relevant libraries --------------------------------------------
 {library(tidyverse)
 library(stringr)
 library(suncalc)
@@ -16,12 +16,34 @@ library(diveMove)}
 
 # Accessing data ----------------------------------------------------------
 #Getting full paths for diving data - A total of 11 tags have useful information
-VertMov <- list.files(path = "Data/MiniPAT_Tags/", full.names = T,
+VertMov <- list.files(path = "../../HH_Movements/Data/MiniPAT_Tags/", full.names = T,
                    pattern = "-Series.csv$", recursive = T)
 #Getting list of tag numbers from list of depth data 
 TagID <- str_extract(VertMov, pattern =  "[0-9]{6}")
 #Getting full paths for horizontal movements
-HorMov <- list.files(path = "../Spatial/MiniPATs_NewProcess/csvFiles/", full.names = T)
+HorMov <- list.files(path = "../../Spatial/MiniPATs_NewProcess/csvFiles/", full.names = T)
+
+
+# Getting metadata about tagged sharks ------------------------------------
+miniPat <- readxl::read_excel("../../SupportingData/HH_MiniPats_2016_2019.xlsx", 
+                              sheet = "MiniPATS") %>% 
+  janitor::clean_names()
+#Calculating summary statistics
+miniPat %>% 
+  #drop rows with no data
+  drop_na(days_at_liberty) %>% 
+  #calculating summary statistics
+  rstatix::get_summary_stats(estimated_total_length_m, 
+                             days_at_liberty, 
+                             distance_covered_km, 
+                             type = "common")
+#Calculating distance per day
+miniPat %>% 
+  #drop rows with no data
+  drop_na(days_at_liberty) %>% 
+  select(tag_id, distance_covered_km, days_at_liberty) %>% 
+  mutate(dist_day = distance_covered_km/days_at_liberty) %>% 
+  rstatix::get_summary_stats(dist_day, type = "common")
 
 # Merging horizontal and vertical data ------------------------------------
 #Initialising empty dataframe to store all movement data for all tags
@@ -83,14 +105,31 @@ for(i in seq_along(TagID)){
     #Selecting only relevant columns
     select(date, lon, lat)
   
-  #Merging vertical and horizontal movement data
+  #Sunset and sunrise data
+  Hor <- Hor %>% 
+    #Obtaining time zone based on lat and lon information
+    mutate(tz = lutz::tz_lookup_coords(lat, lon, warn = F),
+           #When GMT is given as timezone it has the wrong symbol, fixing this manually
+           tz = stringr::str_replace(tz, "\\+", "-")) 
+  ##Obtaining sunrise and sunset times for daily locations
+  y <- data.frame()
+  for(j in 1:nrow(Hor)){
+    #One day added to date to correct reported error in suncalc
+    z <- getSunlightTimes(Hor$date[j]+1, Hor$lat[j], Hor$lon[j], tz = Hor$tz[j], 
+                     keep = c("sunrise", "sunset"))
+    y <- rbind(y, z)}
+  #Add sunrise and sunset times to Hor data frame
+  Hor <- Hor %>% 
+    right_join(y %>% select(-date), by = c("lat", "lon"))
+    
+  #Removing unused variables
+  rm(y, z)
+  
+  #Merging vertical and horizontal data 
   x <- Vert %>% left_join(Hor, by = c("date")) %>% 
     janitor::clean_names() %>% 
     #Removing rows with no longitude, as this means the tag was no longer on the shark
     drop_na(lon) %>% 
-    #Obtaining sunrise and sunset times for daily locations
-    cbind(., getSunlightTimes(data = ., tz = "UTC", keep = c("sunrise", "sunset")) %>% 
-            select(-c(date, lat, lon))) %>% 
     #Merging date and time into one column
     unite(dateTime, date, time, sep = " ", remove = F) %>% 
     #Changing dateTime and date columns into Date objects
@@ -112,7 +151,7 @@ for(i in seq_along(TagID)){
   }
 
 #Removing variables no longer needed
-rm(Vert, Hor, x, p)
+rm(Vert, Hor, x, p, i, j)
 
 #Making composite figure with depth histograms for each tag
 #Extracting legend from first figure in the list
@@ -125,43 +164,124 @@ g <- ggarrange(plotlist = plot_list, ncol = 4, nrow = 3, legend = F)
 #Annotate figure with the axis labels
 g <- annotate_figure(g, bottom = "Depth (m)", left = "Density")
 #Saving composite image to disk
-ggsave("Scripts-VerticalMovs/Figures/DepthHistograms.tiff", g, device = "tiff", dpi = 400, width = 25, 
+ggsave("Scripts_Vert/Figures/DepthHistograms.tiff", g, device = "tiff", dpi = 400, width = 25, 
        height = 23.44, units = "cm")
 
-# Diving behaviours -------------------------------------------------------
+# Classifying data --------------------------------------------------------
 #Classiying depths into predefined bins
-Movs <- Movs %>% mutate(DepthBin = case_when(depth < 10 ~ "<10",
-                                             depth >= 10 & depth <= 25 ~ "10-25",
-                                             depth > 25 & depth <= 50 ~ "25-50",
-                                             depth > 50 & depth <= 200 ~ "50-200",
-                                             depth > 200 & depth <= 400 ~ "200-400",
-                                             depth > 400 & depth <= 1000 ~ "400-1000",
-                                             depth > 1000 ~ ">1000"),
-                        #Classifying temperatures into predefined bins
-                        TempBin = case_when(temperature < 10 ~ "<10",
-                                            temperature >= 10 & temperature <= 12 ~ "10-12",
-                                            temperature > 12 & temperature <= 14 ~ "12-14",
-                                            temperature > 14 & temperature <= 16 ~ "14-16",
-                                            temperature > 16 & temperature <= 18 ~ "16-18",
-                                            temperature > 18 & temperature <= 20 ~ "18-20",
-                                            temperature > 20 & temperature <= 22 ~ "20-22",
-                                            temperature > 22 & temperature <= 24 ~ "22-24",
-                                            temperature > 24 & temperature <= 26 ~ "24-26",
-                                            temperature > 26 ~ ">26")) %>% 
+breaksDepth <- c(0, 10, 25, 50, 200, 400, 1000, max(Movs$depth))
+tagsDepth <- c("<10", "10-25", "25-50", "50-200", "200-400", "400-1000", ">1000")
+#Classifying temperatures into predefined bins
+breaksTemp <- c(0, seq(from = 10, to = 26, by = 2), max(Movs$temperature, na.rm = T))
+tagsTemp <- c("<10", "10-12", "12-14", "14-16", "16-18", "18-20", "20-22", "22-24", 
+              "24-26", ">26")
+
+#Reclassifying depth and temperature
+Movs <- Movs %>% 
+  #Correcting time zone of dateTime column
+  mutate(dateTime = timechange::time_force_tz(dateTime, tz = tz),
+                        DepthBin = cut(depth, breaks = breaksDepth, 
+                                    include.lowest = T, right = F, labels = tagsDepth),
+                        TempBin = cut(temperature, breaks = breaksTemp, 
+                                      include.lowest = T, right = F, labels = tagsTemp)) %>% 
   #Changing newly created columns into ordered factors
-  mutate(DepthBin = factor(DepthBin,
-                           levels = c("<10", "10-25", "25-50", "50-200", "200-400", "400-1000",
-                                      ">1000"), ordered = T),
-         TempBin = factor(TempBin,
-                          levels = c("<10", "10-12", "12-14", "14-16", "16-18", "18-20", "20-22",
-                                     "22-24", "24-26", ">26"), ordered = T))
+  mutate(DepthBin = factor(DepthBin, levels = tagsDepth, ordered = T),
+         TempBin = factor(TempBin, levels = tagsTemp, ordered = T)) %>% 
+  #Classifying whether observations occurred at night or during the morning
+  mutate(diel = case_when(dateTime < sunrise ~ "Night", 
+                          dateTime >= sunrise & dateTime < sunset ~ "Morning",
+                          dateTime >= sunset ~ "Night"))
+
+#Removing variables no longer in use
+rm(breaksDepth, breaksTemp, tagsDepth, tagsTemp)
+
+
+# Summarising movement data -----------------------------------------------
+Movs %>% group_by(ptt, diel) %>% 
+  rstatix::get_summary_stats(depth, temperature, type = "mean_se")
+
+#Obtaining summary for depth and temperature per tag
+Movs %>% select(ptt, diel, date, depth, temperature) %>% 
+  group_by(ptt, diel, date) %>% 
+  mutate(minDepth = min(depth), 
+         maxDepth = max(depth)) %>% 
+  group_by(ptt, diel) %>% 
+  rstatix::get_summary_stats(minDepth, maxDepth, temperature, type = "mean_se") %>% 
+  select(-n) %>% 
+  pivot_wider(names_from = variable, values_from = c(mean, se)) %>% 
+  unite("MaxDepth", mean_maxDepth, se_maxDepth, sep = " ± ") %>% 
+  unite("MinDepth", mean_minDepth, se_minDepth, sep = " ± ") %>% 
+  unite("Temp", mean_temperature, se_temperature, sep = " ± ") %>% 
+  pivot_wider(names_from = diel, values_from = c(MaxDepth, MinDepth, Temp)) %>% 
+  write.csv("Scripts_Vert/Outputs/minMaxDepth.csv", row.names = F)
+
+
+#Testing for differences in mean temp, min and max depths between morning and night
+#Extracting data
+SumDepTemp <- Movs %>% select(ptt, diel, date, depth, temperature) %>% 
+  group_by(ptt, diel, date) %>% 
+  summarise(minDepth = min(depth), 
+         maxDepth = max(depth),
+         meanTemp = mean(temperature)) %>% 
+  mutate(year = lubridate::year(date),
+         month = lubridate::month(date))
+
+#Univariate PERMANOVA
+#Minimum depth
+#Differences between day and night - Non significant (p = 0.342)
+vegan::adonis(minDepth ~ diel, data = SumDepTemp, permutations = 999, 
+              method = "euclidean")
+#Differences among animals - Non significant (p = 0.342)
+vegan::adonis(minDepth ~ ptt, data = SumDepTemp, permutations = 999, 
+              method = "euclidean")
+#Differences across years - Non significant (p = 0.209)
+vegan::adonis(minDepth ~ year, data = SumDepTemp, permutations = 999, 
+              method = "euclidean")
+#Differences across months - Non significant (p = 0.974)
+vegan::adonis(minDepth ~ month, data = SumDepTemp, permutations = 999, 
+              method = "euclidean")
+
+#Maximum depth
+#Differences between day and night - Significant (p = 0.001)
+vegan::adonis(maxDepth ~ diel, data = SumDepTemp, permutations = 999, 
+              method = "euclidean")
+#Differences among animals - Significant (p = 0.001)
+vegan::adonis(maxDepth ~ ptt, data = SumDepTemp, permutations = 999, 
+              method = "euclidean")
+#Differences across years - Non significant (p = 0.641)
+vegan::adonis(maxDepth ~ year, data = SumDepTemp, permutations = 999, 
+              method = "euclidean")
+#Differences across months - Significant (p = 0.001)
+vegan::adonis(maxDepth ~ month, data = SumDepTemp, permutations = 999, 
+              method = "euclidean")
+#Differences between day and night across individuals - Interaction non-sig (p = 0.721)
+vegan::adonis(maxDepth ~ diel*ptt, data = SumDepTemp, permutations = 999, 
+              method = "euclidean")
+#Differences between day and night across months - Interaction non-sig (p = 0.798)
+vegan::adonis(maxDepth ~ diel*month, data = SumDepTemp, permutations = 999, 
+              method = "euclidean")
+#Differences among individuals across months - Interaction sig (p = 0.001)
+vegan::adonis(maxDepth ~ ptt*month, data = SumDepTemp, permutations = 999, 
+              method = "euclidean")
+#Differences between day and night across individuals and months
+vegan::adonis(maxDepth ~ diel*ptt*month, data = SumDepTemp, permutations = 999, 
+              method = "euclidean")
+
+#Mean temperatures
+#Differences between day and night - Non significant (p = 0.421)
+vegan::adonis(meanTemp ~ diel, data = SumDepTemp %>% drop_na(meanTemp), 
+              permutations = 999, method = "euclidean")
+#Differences among animals - Significant (p = 0.001)
+vegan::adonis(meanTemp ~ ptt, data = SumDepTemp %>% drop_na(meanTemp),  
+              method = "euclidean")
+#Differences across years - Non significant (p = 0.092)
+vegan::adonis(meanTemp ~ year, data = SumDepTemp %>% drop_na(meanTemp), 
+              method = "euclidean")
+#Differences across months - Non significant (p = 0.738)
+vegan::adonis(meanTemp ~ month, data = SumDepTemp %>% drop_na(meanTemp), 
+              method = "euclidean")
 
 ## Diel diving patterns ----------------------------------------------------
-#Classifying whether observations occurred at night or during the morning
-Movs <- Movs %>% mutate(diel = case_when(dateTime < sunrise ~ "Night",
-                                         dateTime >= sunrise & date < sunset ~ "Morning",
-                                         dateTime >= sunset ~ "Night"))
-
 #Maximum daily depth reached per animal during the morning and the evening
 DielDives <- {Movs %>%
     group_by(ptt, date, diel) %>% summarise(maxD = max(depth, na.rm = T))%>% 
@@ -180,28 +300,32 @@ DielDives <- {Movs %>%
           axis.title = element_text(family = "sans", size = 12),
           axis.text = element_text(family = "sans", size = 12))}
 #Saving graph
-ggsave("Scripts-VerticalMovs/Figures/MaxDepthDiel.tiff", DielDives, device = "tiff", dpi = 400, width = 35, 
+ggsave("Scripts_Vert/Figures/MaxDepthDiel.tiff", DielDives, device = "tiff", dpi = 400, width = 35, 
        height = 32.85, units = "cm")
 
 # Depth-time distribution -------------------------------------------------
-#2016
-{x <- Movs %>%
-  #Selecting only tags that were deployed in 2016 (first six tags in the list)
-  filter(ptt %in% TagID[1:6]) %>% 
-  #Calculate the total time each animal was tracked during the day and night
-  group_by(ptt, diel) %>% mutate(timeT = sum(timeDiff, na.rm = T)) %>% 
+x <- Movs %>% 
+  #Create a year category
+  mutate(year = lubridate::year(date),
+         #Pooling 2016 and 2017 together because data belongs to the same sharks
+         year = case_when(year == 2016 | year == 2017 ~ "2016-2017",
+                          T ~ as.character(year))) %>% 
+  #Calculate the total time each animal was tracked during the day and night per year
+  group_by(ptt, diel, year) %>% mutate(timeT = sum(timeDiff, na.rm = T)) %>% 
   #Calculate the proportion of time each animal was tracked at each depth bin (day and night)
-  group_by(ptt, diel, DepthBin) %>% 
+  group_by(ptt, diel, year, DepthBin) %>% 
   summarise(TotTime = mean(timeT, na.rm = T),
             BinTime = sum(timeDiff, na.rm = T),
-            PropTime = BinTime/TotTime) %>%
+            PropTime = (BinTime/TotTime)*100) %>%
   #Calculate the mean and SE of the proportion of time spent at each depth bin
-  group_by(diel, DepthBin) %>% 
+  group_by(diel, year, DepthBin) %>% 
   summarise(MeanProp = mean(PropTime, na.rm = T),
             SE_Prop = plotrix::std.error(PropTime, na.rm = T))
-  
+
 #Create graph with the depth bins reordered in reverse so the shallower depths appear on the top
-DepthTime2016 <- x %>% ggplot(aes(reorder(DepthBin, desc(DepthBin))))+ 
+DepthTime <- x %>% ggplot(aes(reorder(DepthBin, desc(DepthBin))))+ 
+  #Facet per year (as columns)
+  facet_grid(.~year)+
   #Subsetting the data based on diel patterns
   geom_bar(data = subset(x, diel == "Night"), aes(y = MeanProp, fill = diel), stat = "identity",
            position = "dodge", color = "black")+
@@ -215,36 +339,45 @@ DepthTime2016 <- x %>% ggplot(aes(reorder(DepthBin, desc(DepthBin))))+
   #Flipping coordinates so depth appears on the y axis
   coord_flip()+
   #Changing the labels along the y axis (MeanProp), so they all appear as positive numbers
-  scale_y_continuous(limits = c(-0.75, 0.75),
-                     breaks = seq(-0.75, 0.75, 0.25), 
-                     labels = c(seq(0.75, 0.25, -0.25), seq(0, 0.75, 0.25)))+
-  scale_fill_grey(start = 0.8, end = 0.4)+
+  scale_y_continuous(limits = c(-75, 75),
+                     breaks = seq(-75, 75, 25), 
+                     labels = c(seq(75, 25, -25), seq(0, 75, 25)))+
+  #Change the fill of boxes - colourblind safe
+  scale_fill_manual(values = c("#f5f5f5", "#5ab4ac"))+
+  labs(x = "Depth classes (m)", y = "Time at depth (%)")+
   theme_bw()+
-  theme(axis.title = element_blank(),
+  theme(axis.title = element_text(family = "sans", size = 12),
         axis.text = element_text(family = "sans", size = 12),
         axis.ticks.length.y = unit(.15, "cm"),
-        legend.text = element_text(family = "sans", size = 12),
-        legend.title = element_blank())
-rm(x)}
+        legend.position = "none", 
+        strip.text = element_text(family = "sans", size = 12), 
+        panel.grid = element_blank())
 
-#2018
-{x <- Movs %>%
-  #Selecting only tags that were deployed in 2018 (between 174048 and 174051)
-  filter(ptt %in% c(174048:174051)) %>% 
-  #Calculate the total time each animal was tracked during the day and night
-  group_by(ptt, diel) %>% mutate(timeT = sum(timeDiff, na.rm = T)) %>% 
+#Saving figure
+ggsave("Scripts_Vert/Figures/DepthTime.tiff", DepthTime, device = "tiff", dpi = 400, width = 12,
+       height = 5.5)
+rm(x)
+
+#Proportion of time spent at depth per month
+x <- Movs %>% 
+  mutate(year = lubridate::year(date),
+         month = lubridate::month(date),
+         monthName = factor(month.name[month], levels = month.name, ordered = T)) %>% 
+  #Calculate the total time each animal was tracked during the day and night (per month)
+  group_by(ptt, diel, monthName) %>% mutate(timeT = sum(timeDiff, na.rm = T)) %>% 
   #Calculate the proportion of time each animal was tracked at each depth bin (day and night)
-  group_by(ptt, diel, DepthBin) %>% 
+  group_by(ptt, diel, monthName, DepthBin) %>% 
   summarise(TotTime = mean(timeT, na.rm = T),
             BinTime = sum(timeDiff, na.rm = T),
-            PropTime = BinTime/TotTime) %>%
+            PropTime = (BinTime/TotTime)*100) %>%
   #Calculate the mean and SE of the proportion of time spent at each depth bin
-  group_by(diel, DepthBin) %>% 
+  group_by(diel, monthName, DepthBin) %>% 
   summarise(MeanProp = mean(PropTime, na.rm = T),
             SE_Prop = plotrix::std.error(PropTime, na.rm = T))
 
 #Create graph with the depth bins reordered in reverse so the shallower depths appear on the top
-DepthTime2018 <- x %>% ggplot(aes(reorder(DepthBin, desc(DepthBin))))+ 
+DepthTimeMonth <- x %>% ggplot(aes(reorder(DepthBin, desc(DepthBin))))+ 
+  facet_wrap(~monthName)+
   #Subsetting the data based on diel patterns
   geom_bar(data = subset(x, diel == "Night"), aes(y = MeanProp, fill = diel), stat = "identity",
            position = "dodge", color = "black")+
@@ -255,68 +388,27 @@ DepthTime2018 <- x %>% ggplot(aes(reorder(DepthBin, desc(DepthBin))))+
            position = "dodge", color = "black")+
   geom_errorbar(data = subset(x, diel == "Morning"), aes(ymin = -MeanProp, ymax = -MeanProp-SE_Prop), 
                 width = 0.2, position = position_dodge(.9))+
-  #Flipping coordinates so depth appears on the y axis
-  coord_flip()+
-  #Changing the labels along the y axis (MeanProp), so they all appear as positive numbers
-  scale_y_continuous(limits = c(-0.75, 0.75),
-                     breaks = seq(-0.75, 0.75, 0.25), 
-                     labels = c(seq(0.75, 0.25, -0.25), seq(0, 0.75, 0.25)))+
-  scale_fill_grey(start = 0.8, end = 0.4)+
-  theme_bw()+
-  theme(axis.title = element_blank(),
-        axis.text.y = element_blank(),
-        axis.ticks.length.y = unit(0.15, "cm"),
-        axis.text = element_text(family = "sans", size = 12),
-        legend.text = element_text(family = "sans", size = 12),
-        legend.title = element_blank())
-rm(x)}
-
-#2019
-{x <- Movs %>%
-  #Only one tag was deployed in 2019
-  filter(ptt == 178974) %>% 
-  #Calculate the total time each animal was tracked during the day and night
-  group_by(diel) %>% mutate(timeT = sum(timeDiff, na.rm = T)) %>% 
-  #Calculate the proportion of time each animal was tracked at each depth bin (day and night)
-  group_by(diel, DepthBin) %>% 
-  summarise(TotTime = mean(timeT, na.rm = T),
-            BinTime = sum(timeDiff, na.rm = T),
-            PropTime = BinTime/TotTime)
-
-#Create graph with the depth bins reordered in reverse so the shallower depths appear on the top
-DepthTime2019 <- x %>% ggplot(aes(reorder(DepthBin, desc(DepthBin))))+ 
-  #Subsetting the data based on diel patterns
-  geom_bar(data = subset(x, diel == "Night"), aes(y = PropTime, fill = diel), stat = "identity",
-           position = "dodge", color = "black")+
-  #Second subset with negative y axis (PropTime) so it appears on the left hand side of the plot
-  geom_bar(data = subset(x, diel == "Morning"), aes(y = -PropTime, fill = diel), stat = "identity",
-           position = "dodge", color = "black")+
   #Flipping coordinates so depth appears on the y axis
   coord_flip()+
   #Changing the labels along the y axis (PropTime), so they all appear as positive numbers
-  scale_y_continuous(limits = c(-0.75, 0.75),
-                     breaks = seq(-0.75, 0.75, 0.25), 
-                     labels = c(seq(0.75, 0.25, -0.25), seq(0, 0.75, 0.25)))+
-  scale_fill_grey(start = 0.8, end = 0.4)+
+  scale_y_continuous(limits = c(-75, 75),
+                     breaks = seq(-75, 75, 25), 
+                     labels = c(seq(75, 25, -25), seq(0, 75, 25)))+
+  #Change box colour fill - colourblind safe
+  scale_fill_manual(values = c("#f5f5f5", "#5ab4ac"))+
+  labs(x = "Depth classes (m)", y = "Time at depth (%)")+
   theme_bw()+
-  theme(axis.title = element_blank(),
-        axis.text.y = element_blank(),
-        axis.text.x = element_text(family = "sans", size = 12),
+  theme(axis.title = element_text(family = "sans", size = 12),
+        axis.text = element_text(family = "sans", size = 12),
         axis.ticks.length.y = unit(0.15, "cm"),
-        legend.text = element_text(family = "sans", size = 12),
-        legend.title = element_blank())
-rm(x)}
+        legend.position = "none",
+        strip.text = element_text(family = "sans", size = 12),
+        panel.grid = element_blank())
 
-#Creating composite figure
-DepthTime <- ggarrange(DepthTime2016, DepthTime2018, DepthTime2019, ncol = 3, 
-                       labels = c("A", "B", "C"), common.legend = T, hjust = 0.1, 
-                       widths = c(1, 0.75, 0.75))
-DepthTime <- annotate_figure(DepthTime, left = "Depth (m)", bottom = "Proportion of time")
-#Saving composite figure
-ggsave("Scripts-VerticalMovs/Figures/DepthTime.tiff", DepthTime, device = "tiff", dpi = 400, height = 20, 
-       width = 18.75, units = "cm")
-#Removing graphs no longer needed
-rm(list = ls(pattern = "DepthTime[0-9]"))
+#Saving figure
+ggsave("Scripts_Vert/Figures/DepthTimeMonth.tiff", DepthTimeMonth, device = "tiff", dpi = 400,
+       width = 12, height = 7.5)
+rm(x)
 
 # Summary Statistics Table ------------------------------------------------
 #Summary statistics of temperature amd depth per individual per month
@@ -341,7 +433,7 @@ x1 <-  {Movs %>% group_by(ptt, lubridate::month(date)) %>%
                values_to = "val") %>% 
   pivot_wider(names_from = ptt, values_from = val)
 #Saving summary statistics
-write.csv(x1, "Scripts-VerticalMovs/Outputs/summary.csv", row.names = F)
+write.csv(x1, "Scripts_Vert/Outputs/summary.csv", row.names = F)
 #Removing unused variable
 rm(x1)}
 
@@ -560,7 +652,7 @@ DT_2016 <- {ggarrange(ggarrange(DT_15days, DT_52days, ncol = 2, common.legend = 
                 #Second composite is half the height than the first
                 nrow = 2, heights = c(1, 0.5))}
 #Saving composite figure to disk
-ggsave("Scripts-VerticalMovs/Figures/DepthTempProfiles2016.tiff", DT_2016, "tiff", dpi = 400, units = "cm", 
+ggsave("Scripts_Vert/Figures/DepthTempProfiles2016.tiff", DT_2016, "tiff", dpi = 400, units = "cm", 
        width = 20, height = 18.28) #width = 17.5, height = 15.99 also works, but no less than this
 
 #Removing graphs no longer in use (ending in days)
@@ -607,7 +699,7 @@ DT_2019 <- {Movs %>% filter(ptt == 178974) %>%
                                 ticks.colour = "black", 
                                 frame.colour = "black", frame.linewidth = 0.1))}
 #Saving figure
-ggsave("Scripts-VerticalMovs/Figures/DepthTempProfiles2019.tiff", DT_2019, device = "tiff", dpi = 400)
+ggsave("Scripts_Vert/Figures/DepthTempProfiles2019.tiff", DT_2019, device = "tiff", dpi = 400)
 
 
 ## Daily diving profiles for tags with no temperature data recorded
@@ -670,7 +762,7 @@ DP_180days <- {Movs %>% filter(ptt %in% c(174050, 174051)) %>%
 #Creating composite figure
 DP_2018 <- ggarrange(DP_90days, DP_180days, ncol = 2, widths = c(1, 0.85), labels = c("A", "B"))
 #Saving composite figure
-ggsave("Scripts-VerticalMovs/Figures/DivingProfiles_2018.tiff", DP_2018, "tiff", dpi = 400, units = "cm",
+ggsave("Scripts_Vert/Figures/DivingProfiles_2018.tiff", DP_2018, "tiff", dpi = 400, units = "cm",
        width = 20, height = 18.77)
 
 rm(list = c(ls(pattern = glob2rx("DT_*days")), ls(pattern = glob2rx("DP_*days"))))
@@ -738,7 +830,7 @@ KM_fig <- fviz_cluster(KM_TE, data = clusterTE, palette = "jco",
         legend.title  = element_text(family = "sans", size = 12))+
   labs(shape = "Cluster", fill = "Cluster", color = "Cluster")
 #Saving the plot
-ggsave("Scripts-VerticalMovs/Figures/KM_fig.tiff", KM_fig, "tiff", dpi = 400)
+ggsave("Scripts_Vert/Figures/KM_fig.tiff", KM_fig, "tiff", dpi = 400)
 
 #Extracting temperature and depth data from combined data using results from k-means
 KM_Res <- data.frame(cluster = KM_TE$cluster) %>% rownames_to_column(var = "ID") %>% 
@@ -785,7 +877,7 @@ MeanTempDepth <- KM_Res %>%
   theme(axis.text = element_text(family = "sans", size = 12),
         axis.title = element_text(family = "sans", size = 12))
 #Saving graph
-ggsave("Scripts-VerticalMovs/Figures/MeanTempDepth.tiff", MeanTempDepth, "tiff", dpi = 400)
+ggsave("Scripts_Vert/Figures/MeanTempDepth.tiff", MeanTempDepth, "tiff", dpi = 400)
 
 
 #Hierarchical clusters
@@ -802,7 +894,7 @@ Hclus <- Hclus + theme(axis.title.y = element_text(family = "sans", size = 12),
               axis.text.y = element_text(family = "sans", size = 12),
               title = element_text(family = "sans", size = 12))
 #Saving hierarchical cluster
-ggsave("../Figures/HierarchicalCluster.tiff", Hclus, device = "tiff", dpi = 400, 
+ggsave("Scripts_Vert/Figures/HierarchicalCluster.tiff", Hclus, device = "tiff", dpi = 400, 
       width = 46.16, height = 20.36, units = "cm")
 #Extract the IDs that make up every cluster
 HClus_res <- data.frame(cluster = cutree(res.hc, 5)) %>% 
@@ -849,7 +941,7 @@ MeanTempDepth_HC <- HClus_res %>%
         legend.direction = "horizontal")+
   guides(color = guide_legend(title = "Cluster", title.position = "top", ncol = 2))
 #Saving graph
-ggsave("Scripts-VerticalMovs/Figures/MeanTempDepth_HClus.tiff", MeanTempDepth_HC, "tiff", dpi = 400)
+ggsave("Scripts_Vert/Figures/MeanTempDepth_HClus.tiff", MeanTempDepth_HC, "tiff", dpi = 400)
 
 
 #Determining how many tags and how many unique days were used in the cluster analysis
@@ -867,7 +959,8 @@ ClusterTags %>% distinct(date) %>% count()
 
 
 # Recorded depths comparisons by tag --------------------------------------
-#Boxplot of distribution of depths recorded by each tagRecDepths <- Movs %>% ggplot(aes(x = ptt, y = depth, colour = ptt))+
+#Boxplot of distribution of depths recorded by each tag
+RecDepths <- Movs %>% ggplot(aes(x = ptt, y = depth, colour = ptt))+
   #Outliers presented as grey dots
   geom_boxplot(outlier.colour = "grey60")+
   #Flipping coordinates
@@ -879,4 +972,8 @@ ClusterTags %>% distinct(date) %>% count()
         axis.title.x = element_text(family = "sans", size = 12))
   
 #Saving plot
-ggsave("Scripts-VerticalMovs/Figures/RecDepthsTag.tiff", RecDepths, device = "tiff", dpi = 400)
+ggsave("Scripts_Vert/Figures/RecDepthsTag.tiff", RecDepths, device = "tiff", dpi = 400)
+
+
+
+
